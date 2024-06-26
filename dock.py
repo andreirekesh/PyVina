@@ -97,6 +97,7 @@ class VinaDocking:
                  keep_output_file: bool = True,
                  keep_log_file: bool = True,
                  keep_config_file: bool = True,
+                 get_pose_str: bool = False,
                  timeout_duration: int = None,
                  additional_vina_args: Dict[str, str] = {},
                  ligand_preparation_fn: callable = PyVina.ligand_preparators.MeekoLigandPreparator(False),
@@ -122,6 +123,7 @@ class VinaDocking:
             - keep_output_file: Save output file (True) or not (False)
             - keep_log_file: Save log file (True) or not (False)
             - keep_config_file: Save config file (True) or not (False)
+            - get_pose_str: Return output pose as string (True) or not (False)
             - timeout_duration: Timeout in seconds before new process automatically stops
             - additional_vina_args: Dictionary of additional Vina command arguments (e.g. {"cpu": "5"})
             - ligand_preparation_fn: Function/Class callable to prepare molecule for docking. Should take the \
@@ -141,7 +143,8 @@ class VinaDocking:
             with subprocess.Popen(f"{vina_cmd} --help_advanced",
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    shell=True) as proc:
+                    shell=True,
+                    cwd=vina_cwd) as proc:
                 if proc.wait(timeout=timeout_duration) == 0:
                     result = proc.stdout.read()
                     if result is not None:
@@ -223,6 +226,7 @@ class VinaDocking:
         self.keep_output_file = keep_output_file
         self.keep_log_file = keep_log_file
         self.keep_config_file = keep_config_file
+        self.get_pose_str = get_pose_str
         self.timeout_duration = timeout_duration
         self.additional_vina_args = additional_vina_args
         self.ligand_preparation_fn = ligand_preparation_fn  # should follow format (smiles string, ligand_path)
@@ -338,8 +342,8 @@ class VinaDocking:
             tmp_config_file_path = f"{self.tmp_config_file_path}_{gpu_id}"
             tmp_config_file_paths.append(tmp_config_file_path)
             self._write_conf_file(tmp_config_file_path,
-                                {"ligand_directory": f"{self.tmp_ligand_dir_path}/{gpu_id}/",
-                                 "output_directory": f"{self.tmp_output_dir_path}/{gpu_id}/"})
+                                {"ligand_directory": f"{self.tmp_ligand_dir_path}{gpu_id}/",
+                                 "output_directory": f"{self.tmp_output_dir_path}{gpu_id}/"})
             for tmp_ligand_file in split_tmp_ligand_paths[i]:
                 try:
                     shutil.copy(tmp_ligand_file, os.path.abspath(f"{self.tmp_ligand_dir_path}/{gpu_id}/"))
@@ -354,7 +358,7 @@ class VinaDocking:
             self.docking_profiler.time_it(self._run_vina, config_paths, vina_cmd_prefixes=vina_cmd_prefixes, blocking=False)
         else:
             self._run_vina(config_paths, vina_cmd_prefixes=vina_cmd_prefixes, blocking=False)
-        
+
         # Move files from temporary to proper directory (or delete if redoing calculation)
         if self.keep_ligand_file:
             for gpu_id in self.gpu_ids:
@@ -374,9 +378,16 @@ class VinaDocking:
         binding_scores = []
         for i in range(len(smis)):
             binding_scores.append(self._get_output_score(output_paths[i]))
-        
+
+        if self.get_pose_str:
+            binding_poses = []
+            for i in range(len(smis)):
+                binding_poses.append(self._get_output_pose(output_paths[i]))
+            
+            binding_scores = list(zip(binding_scores, binding_poses))
+
         self._delete_tmp_files(tmp_config_file_paths)
-        
+
         return binding_scores
     
     def _prepare_ligands(self, smis: List[str],
@@ -413,7 +424,16 @@ class VinaDocking:
             return score
         except FileNotFoundError:
             return None
-    
+
+    @staticmethod
+    def _get_output_pose(output_path: str) -> Union[str, None]:
+        try:
+            with open(output_path, 'r') as f:
+                docked_pdbqt = f.read()
+            return docked_pdbqt
+        except FileNotFoundError:
+            return None
+
     def _write_conf_file(self, config_file_path: str, args: Dict[str, str] = {}):
         conf = f'receptor = {self.receptor_pdbqt_file}\n' + \
                f'center_x = {self.center_pos[0]}\n' + \
@@ -424,10 +444,13 @@ class VinaDocking:
                f'size_z = {self.size[2]}\n'
 
         for k, v in self.additional_vina_args.items():
-            conf += f"{str(k)} = {str(v)} \n"
+            conf += f"{str(k)} = {str(v)}\n"
         
         for k, v in args.items():
-            conf += f"{str(k)} = {str(v)} \n"
+            if self.vina_cwd: # vina_cwd is not none, meaning we have to use global paths for config ligand and output dirs
+                conf += f"{str(k)} = {os.path.join(os.getcwd(), str(v))}\n"
+            else:
+                conf += f"{str(k)} = {str(v)}\n"
         
         with open(config_file_path, 'w') as f:
             f.write(conf)
